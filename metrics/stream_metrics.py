@@ -1,5 +1,4 @@
 import numpy as np
-from sklearn.metrics import confusion_matrix
 
 class _StreamMetrics(object):
     def __init__(self):

@@ -24,7 +24,7 @@ def get_argparser():
     parser = argparse.ArgumentParser()
 
     # Datset Options
-    parser.add_argument("--data_root", type=str, default='./datasets/data',
+    parser.add_argument("--data_root", type=str, default='/home/sergey/DEV/AI/datasets/cityscapes/',
                         help="path to Dataset")
     parser.add_argument("--dataset", type=str, default='voc',
                         choices=['voc', 'cityscapes'], help='Name of dataset')
