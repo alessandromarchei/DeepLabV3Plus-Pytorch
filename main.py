@@ -64,6 +64,8 @@ def get_argparser():
     parser.add_argument("--crop_size", type=int, default=513)
     parser.add_argument("--multiscale_train", action='store_true', default=False,
                         help="whether multiscale training is applied")
+    parser.add_argument("--bn_momentum", type=float, default=0.01,
+                        help="Batch norm momentum applied")
 
     parser.add_argument("--ckpt", default=None, type=str,
                         help="restore from checkpoint")
@@ -252,7 +254,7 @@ def main():
     model = network.modeling.__dict__[opts.model](num_classes=opts.num_classes, output_stride=opts.output_stride)
     if opts.separable_conv and 'plus' in opts.model:
         network.convert_to_separable_conv(model.classifier)
-    utils.set_bn_momentum(model.backbone, momentum=0.01)
+    utils.set_bn_momentum(model.backbone, momentum=opts.bn_momentum)
 
     # Set up metrics
     metrics = StreamSegMetrics(opts.num_classes)
