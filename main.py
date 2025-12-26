@@ -385,6 +385,13 @@ def main():
             loss.backward()
             optimizer.step()
 
+            if vis is not None:
+                lr_backbone = optimizer.param_groups[0]["lr"]
+                lr_head     = optimizer.param_groups[1]["lr"]
+
+                vis.vis_scalar("train/lr_backbone", cur_itrs, lr_backbone)
+                vis.vis_scalar("train/lr_head",     cur_itrs, lr_head)
+
             np_loss = loss.detach().cpu().numpy()
             interval_loss += np_loss
             if vis is not None:
