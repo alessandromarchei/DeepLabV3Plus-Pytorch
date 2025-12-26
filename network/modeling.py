@@ -8,6 +8,10 @@ from .backbone import (
     xception
 )
 
+import torch
+
+
+
 def _segm_hrnet(name, backbone_name, num_classes, pretrained_backbone):
 
     backbone = hrnetv2.__dict__[backbone_name](pretrained_backbone)
@@ -111,35 +115,47 @@ def _segm_mobilenet(name, backbone_name, num_classes, output_stride, pretrained_
     return model
 
 def _segm_efficientnet(name, backbone_name, num_classes, output_stride, pretrained_backbone):
-    if output_stride==8:
-        #use double the dilation rate with respect to original DeepLabV3 paper (that used OS=16 for training)
+
+    if output_stride == 8:
         aspp_dilate = [12, 24, 36]
     else:
         aspp_dilate = [6, 12, 18]
 
-    backbone = efficientnet.efficientnet_backbone(variant=backbone_name, pretrained=pretrained_backbone, output_stride=output_stride)
-    
-    # rename layers
-    backbone.low_level_features = backbone.features[0:3]
-    backbone.high_level_features = backbone.features[3:-1]
-    backbone.features = None
-    backbone.classifier = None
+    backbone = efficientnet.EfficientNetBackbone(
+        variant=backbone_name,
+        pretrained=pretrained_backbone,
+        output_stride=output_stride,
+    )
 
-    #retrieve the input number of channels for the ASPP module, and the number of low-level feature channels. this depends on the EfficientNet variant
-    inplanes = efficientnet._EFF_OUT_CHANNELS[backbone_name]
-    low_level_planes = efficientnet._EFF_LOW_LEVEL_CHANNELS[backbone_name]
-    
+    # 🔎 inferisci i canali reali con un forward dummy
+    with torch.no_grad():
+        x = torch.zeros(1, 3, 256, 256)
+        feats = backbone(x)
+        inplanes = feats["out"].shape[1]
+        low_level_planes = feats["low_level"].shape[1]
 
-    #log all the data
-    print(f"EfficientNet backbone: {backbone_name}, output_stride: {output_stride}, inplanes: {inplanes}, low_level_planes: {low_level_planes}, pretrained: {pretrained_backbone}")
+    print(
+        f"EfficientNet backbone: {backbone_name}, "
+        f"OS={output_stride}, "
+        f"inplanes={inplanes}, "
+        f"low_level_planes={low_level_planes}"
+    )
 
-    if name=='deeplabv3plus':
-        return_layers = {'high_level_features': 'out', 'low_level_features': 'low_level'}
-        classifier = DeepLabHeadV3Plus(inplanes, low_level_planes, num_classes, aspp_dilate)
-    elif name=='deeplabv3':
-        return_layers = {'high_level_features': 'out'}
-        classifier = DeepLabHead(inplanes , num_classes, aspp_dilate)
-    backbone = IntermediateLayerGetter(backbone, return_layers=return_layers)
+    if name == "deeplabv3plus":
+        classifier = DeepLabHeadV3Plus(
+            inplanes,
+            low_level_planes,
+            num_classes,
+            aspp_dilate
+        )
+    elif name == "deeplabv3":
+        classifier = DeepLabHead(
+            inplanes,
+            num_classes,
+            aspp_dilate
+        )
+    else:
+        raise ValueError(name)
 
     model = DeepLabV3(backbone, classifier)
     return model

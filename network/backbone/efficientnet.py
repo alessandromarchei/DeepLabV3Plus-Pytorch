@@ -104,14 +104,14 @@ def _get_weights(variant: str, pretrained: bool):
         return None
 
     mapping = {
-        "efficientnet_b0": EfficientNet_B0_Weights.DEFAULT,
-        "efficientnet_b1": EfficientNet_B1_Weights.DEFAULT,
-        "efficientnet_b2": EfficientNet_B2_Weights.DEFAULT,
-        "efficientnet_b3": EfficientNet_B3_Weights.DEFAULT,
-        "efficientnet_b4": EfficientNet_B4_Weights.DEFAULT,
-        "efficientnet_b5": EfficientNet_B5_Weights.DEFAULT,
-        "efficientnet_b6": EfficientNet_B6_Weights.DEFAULT,
-        "efficientnet_b7": EfficientNet_B7_Weights.DEFAULT,
+        "efficientnet_b0": EfficientNet_B0_Weights.IMAGENET1K_V1,
+        "efficientnet_b1": EfficientNet_B1_Weights.IMAGENET1K_V1,
+        "efficientnet_b2": EfficientNet_B2_Weights.IMAGENET1K_V1,
+        "efficientnet_b3": EfficientNet_B3_Weights.IMAGENET1K_V1,
+        "efficientnet_b4": EfficientNet_B4_Weights.IMAGENET1K_V1,
+        "efficientnet_b5": EfficientNet_B5_Weights.IMAGENET1K_V1,
+        "efficientnet_b6": EfficientNet_B6_Weights.IMAGENET1K_V1,
+        "efficientnet_b7": EfficientNet_B7_Weights.IMAGENET1K_V1,
     }
     if variant not in mapping:
         raise ValueError(f"Variant non supportata: {variant}. Attese: {list(mapping.keys())}")
@@ -199,73 +199,53 @@ def _apply_output_stride(module: nn.Module, output_stride: int):
 
 class EfficientNetBackbone(nn.Module):
     """
-    Wrapper semplice:
-      - self.features: backbone conv (torchvision)
-      - self.classifier: head lineare opzionale (come MobileNetV2)
-      - forward_features() per usarlo come backbone
+    EfficientNet backbone per DeepLab:
+    - restituisce un dict: { "low_level", "out" }
+    - low_level = primo feature map con output_stride = 4
+    - out = feature map finale (OS = 8 o 16)
     """
 
     def __init__(
         self,
-        variant: _EFF_VARIANTS = "efficientnet_b0",
-        num_classes: int = 1000,
-        output_stride: int = 32,
+        variant: str = "efficientnet_b0",
+        output_stride: int = 16,
         pretrained: bool = True,
-        freeze: bool = False,
-
-        # Extra utili
-        dropout: Optional[float] = None,
     ):
         super().__init__()
 
-        self.variant = str(variant).lower()
-        self.output_stride = int(output_stride)
-        self.pretrained = bool(pretrained)
-        self.freeze = bool(freeze)
+        self.variant = variant
+        self.output_stride = output_stride
 
-        tv_model = _build_torchvision_efficientnet(self.variant, pretrained=self.pretrained)
+        tv_model = _build_torchvision_efficientnet(variant, pretrained)
 
-        # Patch output_stride (modifica stride/dilation dentro features)
-        _apply_output_stride(tv_model.features, self.output_stride)
+        # Patch stride/dilation in stile DeepLab
+        _apply_output_stride(tv_model.features, output_stride)
 
         self.features = tv_model.features
-        self.avgpool = tv_model.avgpool  # AdaptiveAvgPool2d(1) in torchvision
-        in_feats = tv_model.classifier[1].in_features  # Linear(in_feats, 1000)
 
-        # Classifier (come MobileNetV2: Dropout + Linear)
-        p = tv_model.classifier[0].p if dropout is None else float(dropout)
-        self.classifier = nn.Sequential(
-            nn.Dropout(p),
-            nn.Linear(in_feats, num_classes),
-        )
+    def forward(self, x):
+        low_level = None
+        cur_stride = 1
 
-        if self.freeze:
-            for p_ in self.features.parameters():
-                p_.requires_grad = False
+        for layer in self.features:
+            x_prev = x
+            x = layer(x)
 
-    @torch.no_grad()
-    def infer_out_channels(self) -> int:
-        """
-        Canali di uscita delle features (prima di avgpool/classifier).
-        """
-        # EfficientNet torchvision termina con un Conv2d che produce i canali finali
-        for m in reversed(list(self.features.modules())):
-            if isinstance(m, nn.Conv2d):
-                return m.out_channels
-        raise RuntimeError("Impossibile inferire out_channels: nessun Conv2d trovato in features.")
+            # detect spatial downsample
+            if x.shape[-1] < x_prev.shape[-1]:
+                cur_stride *= 2
 
-    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Output backbone: [B, C, H/output_stride, W/output_stride]
-        """
-        return self.features(x)
+            # cattura il primo OS=4
+            if cur_stride == 4 and low_level is None:
+                low_level = x
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.forward_features(x)
-        x = self.avgpool(x)          # [B, C, 1, 1]
-        x = torch.flatten(x, 1)      # [B, C]
-        x = self.classifier(x)       # [B, num_classes]
-        return x
+        assert low_level is not None, "Low-level feature (OS=4) non trovata"
+
+        return {
+            "low_level": low_level,   # [B, C_low, H/4, W/4]
+            "out": x                 # [B, C_out, H/OS, W/OS]
+        }
+
 
 
 def efficientnet_backbone(
