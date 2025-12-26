@@ -52,6 +52,14 @@ def get_argparser():
     parser.add_argument("--separable_conv", action='store_true', default=False,
                         help="apply separable conv to decoder and aspp")
     parser.add_argument("--output_stride", type=int, default=16, choices=[8, 16])
+    # Backbone / model extra options (generic)
+    parser.add_argument(
+        "--model_kwargs",
+        type=str,
+        default="",
+        help="Extra kwargs for model/backbone, format: key1=val1,key2=val2"
+    )
+
 
     # Train Options
     parser.add_argument("--test_only", action='store_true', default=False)
@@ -219,6 +227,30 @@ def validate(opts, model, loader, device, metrics, ret_samples_ids=None):
         score = metrics.get_results()
     return score, ret_samples
 
+def parse_model_kwargs(s: str):
+    """
+    Parse: "a=1,b=foo,c=true" -> dict
+    """
+    if not s:
+        return {}
+    out = {}
+    for item in s.split(","):
+        k, v = item.split("=")
+        v = v.lower()
+        if v in ["true", "false"]:
+            v = v == "true"
+        else:
+            try:
+                v = int(v)
+            except ValueError:
+                try:
+                    v = float(v)
+                except ValueError:
+                    pass
+        out[k] = v
+    return out
+
+
 
 def main():
     opts = get_argparser().parse_args()
@@ -227,18 +259,14 @@ def main():
     elif opts.dataset.lower() == 'cityscapes':
         opts.num_classes = 19
 
+    # parse model extra kwargs
+    model_kwargs = parse_model_kwargs(opts.model_kwargs)
 
     # -------------------------------------------------
     # Experiment folders
     # -------------------------------------------------
     exp_dir = os.path.join("checkpoints", opts.exp_name)
     os.makedirs(exp_dir, exist_ok=True)
-
-    log_file = os.path.join(exp_dir, "train.log")
-
-    # -------------------------------------------------
-    # Redirect stdout + stderr to both terminal and file
-    # -------------------------------------------------
 
     print("=" * 80)
     print(f"Experiment: {opts.exp_name}")
@@ -290,7 +318,8 @@ def main():
     print("-" * 80)
 
     # Set up model (all models are 'constructed at network.modeling)
-    model = network.modeling.__dict__[opts.model](num_classes=opts.num_classes, output_stride=opts.output_stride)
+    model = network.modeling.__dict__[opts.model](num_classes=opts.num_classes, output_stride=opts.output_stride, **model_kwargs)
+    
     if opts.separable_conv and 'plus' in opts.model:
         network.convert_to_separable_conv(model.classifier)
     utils.set_bn_momentum(model.backbone, momentum=opts.bn_momentum)

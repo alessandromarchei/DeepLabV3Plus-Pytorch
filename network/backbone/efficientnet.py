@@ -1,22 +1,20 @@
-# efficientnet_v1.py
-# EfficientNet-B0..B7 in "MobileNetV2-style" (explicit layers, explicit padding, explicit init),
-# with output_stride-controlled stride/dilation (for DeepLabV3 / DeepLabV3+ backbones).
-#
-# Notes:
-# - Architecture template follows TorchVision EfficientNet-V1 (MBConv + SE + SiLU). :contentReference[oaicite:0]{index=0}
-# - Repeats per stage are computed like TorchVision: ceil(base_repeats * depth_mult). :contentReference[oaicite:1]{index=1}
-# - Channel endpoints (stem..head) are taken from your provided EFFICIENTNET_CHANNELS.
-#
-# If you want to use it as DeepLab backbone:
-# - set `output_stride=8` or `output_stride=16`
-# - use `model.extract_backbone_features(x)` or `model.features` slices as you prefer.
+#!/usr/bin/env python3
+"""
+efficientnetv1.py
+
+EfficientNet-V1 family (B0..B7) implemented in a MobileNetV2-like style:
+- explicit stages: stem, stage1..stage7, head, classifier
+- output_stride control (8/16/32) via stride->dilation conversion (DeepLab-friendly)
+- pretrained loader via load_state_dict_from_url
+- keeps original classification head (Dropout + Linear)
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import ceil
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple, Optional
 
+import math
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -26,35 +24,20 @@ try:  # torchvision<0.4
 except Exception:  # torchvision>=0.4
     from torch.hub import load_state_dict_from_url
 
+
 __all__ = [
     "EfficientNetV1",
-    "efficientnet_b0",
-    "efficientnet_b1",
-    "efficientnet_b2",
-    "efficientnet_b3",
-    "efficientnet_b4",
-    "efficientnet_b5",
-    "efficientnet_b6",
-    "efficientnet_b7",
+    "efficientnet_b0", "efficientnet_b1", "efficientnet_b2", "efficientnet_b3",
+    "efficientnet_b4", "efficientnet_b5", "efficientnet_b6", "efficientnet_b7",
+    "get_efficientnet",
+    "EFFICIENTNET_CHANNELS",
 ]
 
-# TorchVision weights URLs (EfficientNet-V1). :contentReference[oaicite:2]{index=2}
-model_urls = {
-    "efficientnet_b0": "https://download.pytorch.org/models/efficientnet_b0_rwightman-7f5810bc.pth",
-    "efficientnet_b1": "https://download.pytorch.org/models/efficientnet_b1_rwightman-bac287d4.pth",
-    "efficientnet_b2": "https://download.pytorch.org/models/efficientnet_b2_rwightman-c35c1473.pth",
-    "efficientnet_b3": "https://download.pytorch.org/models/efficientnet_b3_rwightman-b3899882.pth",
-    "efficientnet_b4": "https://download.pytorch.org/models/efficientnet_b4_rwightman-23ab8bcd.pth",
-    "efficientnet_b5": "https://download.pytorch.org/models/efficientnet_b5_lukemelas-1a07897c.pth",
-    "efficientnet_b6": "https://download.pytorch.org/models/efficientnet_b6_lukemelas-24a108a5.pth",
-    "efficientnet_b7": "https://download.pytorch.org/models/efficientnet_b7_lukemelas-c5b4e57e.pth",
-}
-
-# Your requested channels:
+# -------------------------------------------------------------------------
+# Channels per stage (provided by you)
 # [stem, stage1, stage2, stage3, stage4, stage5, stage6, stage7, head]
-# Strides per stage (stem included):
-# stem stride 2
-# stage strides: [1,2,2,2,1,2,1]
+# stride pattern: [2, 1, 2, 2, 2, 1, 2, 1, 1]
+# -------------------------------------------------------------------------
 EFFICIENTNET_CHANNELS: Dict[str, List[int]] = {
     "efficientnet_b0": [32, 16, 24, 40, 80, 112, 192, 320, 1280],
     "efficientnet_b1": [32, 16, 24, 40, 80, 112, 192, 320, 1280],
@@ -66,35 +49,33 @@ EFFICIENTNET_CHANNELS: Dict[str, List[int]] = {
     "efficientnet_b7": [32, 32, 48, 80, 160, 224, 384, 640, 2560],
 }
 
-# TorchVision EfficientNet-V1 uses the same stage template for all B0..B7,
-# with width_mult/depth_mult scaling. :contentReference[oaicite:3]{index=3}
-# We keep the template (expand,kernel,stride,base_repeats) fixed,
-# but we force the out_channels endpoints exactly as you provided.
-_BASE_STAGE_SPECS = [
-    # (expand_ratio, kernel, stride, base_repeats)
-    (1, 3, 1, 1),  # stage1
-    (6, 3, 2, 2),  # stage2
-    (6, 5, 2, 2),  # stage3
-    (6, 3, 2, 3),  # stage4
-    (6, 5, 1, 3),  # stage5
-    (6, 5, 2, 4),  # stage6
-    (6, 3, 1, 1),  # stage7
+# EfficientNet-V1 baseline (B0) block definition (paper)
+# Each tuple: (expansion, kernel, repeats_base, stride_stage, se_ratio)
+# Stages correspond to out channels: stage1..stage7
+_EFF_B0_BLOCKS = [
+    (1, 3, 1, 1, 0.25),  # stage1
+    (6, 3, 2, 2, 0.25),  # stage2
+    (6, 5, 2, 2, 0.25),  # stage3
+    (6, 3, 3, 2, 0.25),  # stage4
+    (6, 5, 3, 1, 0.25),  # stage5
+    (6, 5, 4, 2, 0.25),  # stage6
+    (6, 3, 1, 1, 0.25),  # stage7
 ]
 
-# Standard EfficientNet-V1 compound scaling multipliers used by TorchVision. :contentReference[oaicite:4]{index=4}
-_EFFICIENTNET_MULTS = {
-    "efficientnet_b0": (1.0, 1.0),
-    "efficientnet_b1": (1.0, 1.1),
-    "efficientnet_b2": (1.1, 1.2),
-    "efficientnet_b3": (1.2, 1.4),
-    "efficientnet_b4": (1.4, 1.8),
-    "efficientnet_b5": (1.6, 2.2),
-    "efficientnet_b6": (1.8, 2.6),
-    "efficientnet_b7": (2.0, 3.1),
+# Depth multipliers (V1 family)
+_DEPTH_MULT = {
+    "efficientnet_b0": 1.0,
+    "efficientnet_b1": 1.1,
+    "efficientnet_b2": 1.2,
+    "efficientnet_b3": 1.4,
+    "efficientnet_b4": 1.8,
+    "efficientnet_b5": 2.2,
+    "efficientnet_b6": 2.6,
+    "efficientnet_b7": 3.1,
 }
 
-# Dropout used by TorchVision EfficientNet-V1 factory functions. :contentReference[oaicite:5]{index=5}
-_EFFICIENTNET_DROPOUT = {
+# Dropout rates (common defaults)
+_DROPOUT = {
     "efficientnet_b0": 0.2,
     "efficientnet_b1": 0.2,
     "efficientnet_b2": 0.3,
@@ -105,71 +86,79 @@ _EFFICIENTNET_DROPOUT = {
     "efficientnet_b7": 0.5,
 }
 
+# Stochastic depth base (drop connect) – typical defaults
+_DROP_CONNECT = {
+    "efficientnet_b0": 0.2,
+    "efficientnet_b1": 0.2,
+    "efficientnet_b2": 0.2,
+    "efficientnet_b3": 0.2,
+    "efficientnet_b4": 0.2,
+    "efficientnet_b5": 0.2,
+    "efficientnet_b6": 0.2,
+    "efficientnet_b7": 0.2,
+}
 
-def _make_divisible(v: float, divisor: int, min_value: Optional[int] = None) -> int:
-    """Same helper style as MobileNetV2 script."""
-    if min_value is None:
-        min_value = divisor
-    new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)
-    if new_v < 0.9 * v:
-        new_v += divisor
-    return int(new_v)
+# Pretrained URLs (torchvision-style; update if your env differs)
+model_urls = {
+    "efficientnet_b0": "https://download.pytorch.org/models/efficientnet_b0_rwightman-3dd342df.pth",
+    "efficientnet_b1": "https://download.pytorch.org/models/efficientnet_b1_rwightman-533bc792.pth",
+    "efficientnet_b2": "https://download.pytorch.org/models/efficientnet_b2_rwightman-bcdf34b7.pth",
+    "efficientnet_b3": "https://download.pytorch.org/models/efficientnet_b3_rwightman-cf984f9c.pth",
+    "efficientnet_b4": "https://download.pytorch.org/models/efficientnet_b4_rwightman-7eb33cd5.pth",
+    "efficientnet_b5": "https://download.pytorch.org/models/efficientnet_b5_rwightman-b6417697.pth",
+    "efficientnet_b6": "https://download.pytorch.org/models/efficientnet_b6_rwightman-c76e70fd.pth",
+    "efficientnet_b7": "https://download.pytorch.org/models/efficientnet_b7_rwightman-1c0d9f9a.pth",
+}
 
 
+# -------------------------------------------------------------------------
+# Utils: "same-ish" padding like your MobileNetV2 fixed_padding
+# -------------------------------------------------------------------------
 def fixed_padding(kernel_size: int, dilation: int) -> Tuple[int, int, int, int]:
-    """Returns (left,right,top,bottom) padding for 'same' conv with dilation."""
-    k_eff = kernel_size + (kernel_size - 1) * (dilation - 1)
-    pad_total = k_eff - 1
+    kernel_size_effective = kernel_size + (kernel_size - 1) * (dilation - 1)
+    pad_total = kernel_size_effective - 1
     pad_beg = pad_total // 2
     pad_end = pad_total - pad_beg
     return (pad_beg, pad_end, pad_beg, pad_end)
 
 
-def drop_connect(x: torch.Tensor, p: float, training: bool) -> torch.Tensor:
-    """Stochastic depth (a.k.a. drop connect)."""
-    if (not training) or p <= 0.0:
-        return x
-    keep_prob = 1.0 - p
-    # broadcast over (N, C, H, W)
-    rand = keep_prob + torch.rand((x.shape[0], 1, 1, 1), dtype=x.dtype, device=x.device)
-    mask = torch.floor(rand)
-    return x / keep_prob * mask
-
-
 class ConvBNAct(nn.Module):
-    """Conv2d + BN + activation, with explicit 'same' padding via F.pad (MobileNetV2 style)."""
-
     def __init__(
         self,
         in_ch: int,
         out_ch: int,
-        kernel_size: int,
-        stride: int,
+        kernel_size: int = 3,
+        stride: int = 1,
         dilation: int = 1,
         groups: int = 1,
-        act_layer: Optional[nn.Module] = nn.SiLU,
-    ) -> None:
+        act: str = "silu",
+    ):
         super().__init__()
-        self.kernel_size = int(kernel_size)
-        self.dilation = int(dilation)
-        self.stride = int(stride)
-        self.input_padding = fixed_padding(self.kernel_size, self.dilation)
+        self.kernel_size = kernel_size
+        self.dilation = dilation
+        self.stride = stride
 
         self.conv = nn.Conv2d(
-            in_ch,
-            out_ch,
-            kernel_size=self.kernel_size,
-            stride=self.stride,
-            padding=0,  # we pad manually
-            dilation=self.dilation,
-            groups=groups,
-            bias=False,
+            in_ch, out_ch, kernel_size=kernel_size, stride=stride, padding=0,
+            dilation=dilation, groups=groups, bias=False
         )
-        self.bn = nn.BatchNorm2d(out_ch, eps=0.001, momentum=0.01)  # matches torchvision defaults :contentReference[oaicite:6]{index=6}
-        self.act = act_layer(inplace=True) if act_layer is not None else nn.Identity()
+        self.bn = nn.BatchNorm2d(out_ch)
+
+        if act == "silu":
+            self.act = nn.SiLU(inplace=True)
+        elif act == "relu":
+            self.act = nn.ReLU(inplace=True)
+        elif act == "relu6":
+            self.act = nn.ReLU6(inplace=True)
+        elif act == "identity":
+            self.act = nn.Identity()
+        else:
+            raise ValueError(f"Unknown act='{act}'")
+
+        self._pad = fixed_padding(kernel_size, dilation)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.pad(x, self.input_padding)
+        x = F.pad(x, self._pad)
         x = self.conv(x)
         x = self.bn(x)
         x = self.act(x)
@@ -177,31 +166,38 @@ class ConvBNAct(nn.Module):
 
 
 class SqueezeExcite(nn.Module):
-    def __init__(self, in_ch: int, se_ratio: float = 0.25) -> None:
+    def __init__(self, in_ch: int, se_ratio: float = 0.25):
         super().__init__()
-        # EfficientNet-V1 uses se_ratio=0.25; channel is made divisible. (common implementations)
-        squeezed = _make_divisible(in_ch * se_ratio, 8)
-        self.reduce = nn.Conv2d(in_ch, squeezed, kernel_size=1, bias=True)
-        self.expand = nn.Conv2d(squeezed, in_ch, kernel_size=1, bias=True)
-        self.act = nn.SiLU(inplace=True)
+        reduced = max(1, int(in_ch * se_ratio))
+        self.fc1 = nn.Conv2d(in_ch, reduced, kernel_size=1)
+        self.fc2 = nn.Conv2d(reduced, in_ch, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         s = x.mean((2, 3), keepdim=True)
-        s = self.reduce(s)
-        s = self.act(s)
-        s = self.expand(s)
-        s = torch.sigmoid(s)
+        s = F.silu(self.fc1(s), inplace=True)
+        s = torch.sigmoid(self.fc2(s))
         return x * s
+
+
+def drop_connect(x: torch.Tensor, drop_prob: float, training: bool) -> torch.Tensor:
+    if drop_prob <= 0.0 or (not training):
+        return x
+    keep_prob = 1.0 - drop_prob
+    # per-sample mask
+    mask = torch.rand((x.shape[0], 1, 1, 1), device=x.device, dtype=x.dtype) < keep_prob
+    x = x / keep_prob
+    x = x * mask
+    return x
 
 
 class MBConv(nn.Module):
     """
     EfficientNet-V1 MBConv:
-    - optional expand 1x1
-    - depthwise kxk (with stride/dilation)
-    - SE
-    - project 1x1
-    - skip + stochastic depth when stride=1 and in==out
+    - optional expand (1x1)
+    - depthwise kxk
+    - squeeze-excite
+    - project (1x1)
+    - residual if stride==1 and in==out
     """
 
     def __init__(
@@ -212,176 +208,157 @@ class MBConv(nn.Module):
         dilation: int,
         expand_ratio: int,
         kernel_size: int,
-        drop_rate: float,
-    ) -> None:
+        se_ratio: float,
+        drop_connect_rate: float,
+    ):
         super().__init__()
-        assert stride in (1, 2)
+        assert stride in [1, 2]
 
-        self.in_ch = int(in_ch)
-        self.out_ch = int(out_ch)
-        self.stride = int(stride)
-        self.dilation = int(dilation)
-        self.expand_ratio = int(expand_ratio)
-        self.kernel_size = int(kernel_size)
-        self.drop_rate = float(drop_rate)
+        self.use_res = (stride == 1 and in_ch == out_ch)
+        self.drop_connect_rate = float(drop_connect_rate)
 
-        mid_ch = int(round(in_ch * expand_ratio))
-        self.use_residual = (self.stride == 1) and (in_ch == out_ch)
+        mid_ch = in_ch * expand_ratio
 
         layers: List[nn.Module] = []
 
-        # 1) expand
         if expand_ratio != 1:
-            layers.append(ConvBNAct(in_ch, mid_ch, kernel_size=1, stride=1, dilation=1, groups=1, act_layer=nn.SiLU))
+            layers.append(ConvBNAct(in_ch, mid_ch, kernel_size=1, stride=1, dilation=1, act="silu"))
 
-        # 2) depthwise
+        # depthwise
         layers.append(
             ConvBNAct(
-                mid_ch,
-                mid_ch,
-                kernel_size=self.kernel_size,
-                stride=self.stride,
-                dilation=self.dilation,
-                groups=mid_ch,
-                act_layer=nn.SiLU,
+                mid_ch, mid_ch, kernel_size=kernel_size, stride=stride,
+                dilation=dilation, groups=mid_ch, act="silu"
             )
         )
 
         self.pre_se = nn.Sequential(*layers)
+        self.se = SqueezeExcite(mid_ch, se_ratio=se_ratio) if se_ratio and se_ratio > 0 else nn.Identity()
 
-        # 3) SE
-        self.se = SqueezeExcite(mid_ch, se_ratio=0.25)
-
-        # 4) project
-        self.project_conv = nn.Conv2d(mid_ch, out_ch, kernel_size=1, bias=False)
-        self.project_bn = nn.BatchNorm2d(out_ch, eps=0.001, momentum=0.01)
+        self.project = nn.Sequential(
+            nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(out_ch),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.pre_se(x)
         out = self.se(out)
-        out = self.project_conv(out)
-        out = self.project_bn(out)
-
-        if self.use_residual:
-            out = drop_connect(out, self.drop_rate, self.training)
-            out = out + x
+        out = self.project(out)
+        if self.use_res:
+            out = drop_connect(out, self.drop_connect_rate, self.training)
+            out = x + out
         return out
 
 
-@dataclass(frozen=True)
-class EfficientNetConfig:
-    name: str
-    channels: List[int]  # [stem, s1..s7, head]
-    depth_mult: float
-    dropout: float
-    drop_connect_rate: float = 0.2  # typical EfficientNet default
-
-
-def _round_repeats(base: int, depth_mult: float) -> int:
-    return int(ceil(base * depth_mult))
+def _round_repeats(repeats: int, depth_mult: float) -> int:
+    return int(math.ceil(repeats * depth_mult))
 
 
 class EfficientNetV1(nn.Module):
-    """
-    EfficientNet-V1 B0..B7 with:
-    - explicit sequential `features` like MobileNetV2 script
-    - explicit init like your MobileNetV2 script
-    - output_stride-driven stride/dilation (DeepLab-friendly)
-
-    channels are forced to EFFICIENTNET_CHANNELS[...] (no width rounding),
-    repeats follow torchvision-style ceil(base_repeats * depth_mult). :contentReference[oaicite:7]{index=7}
-    """
-
     def __init__(
         self,
-        cfg: EfficientNetConfig,
+        arch: str,
         num_classes: int = 1000,
         output_stride: int = 32,
-        in_chans: int = 3,
-    ) -> None:
+        drop_rate: float = 0.2,
+        drop_connect_rate: float = 0.2,
+    ):
         super().__init__()
-        assert output_stride in (8, 16, 32), "output_stride must be 8, 16, or 32"
-        assert len(cfg.channels) == 9, "channels must be [stem, s1..s7, head]"
+        assert arch in EFFICIENTNET_CHANNELS, f"Unknown arch {arch}"
+        assert output_stride in (8, 16, 32), "output_stride must be 8,16,32"
 
-        self.cfg = cfg
-        self.output_stride = int(output_stride)
+        self.arch = arch
         self.num_classes = int(num_classes)
+        self.output_stride = int(output_stride)
 
-        stem_ch = cfg.channels[0]
-        head_ch = cfg.channels[-1]
-        stage_out = cfg.channels[1:-1]  # 7 stages
+        ch = EFFICIENTNET_CHANNELS[arch]
+        stem_ch = ch[0]
+        head_ch = ch[-1]
 
-        # We build like your MobileNetV2: a single nn.Sequential of all conv/blocks.
-        features: List[nn.Module] = []
+        depth_mult = _DEPTH_MULT[arch]
+        self.drop_rate = float(drop_rate)
+        self.drop_connect_rate = float(drop_connect_rate)
 
-        # Track stride/dilation like in MobileNetV2 script
+        # stride pattern:
+        # stem 2, stage1 1, stage2 2, stage3 2, stage4 2, stage5 1, stage6 2, stage7 1, head 1
+        stage_strides = [1, 2, 2, 2, 1, 2, 1]  # stage1..stage7
+
+        # -----------------------------------------------------
+        # Build with "MobileNetV2-like" output_stride logic
+        # -----------------------------------------------------
         current_stride = 1
         dilation = 1
 
-        # ---- Stem (3x3 stride2) ----
-        features.append(ConvBNAct(in_chans, stem_ch, kernel_size=3, stride=2, dilation=1, act_layer=nn.SiLU))
-        current_stride *= 2  # now /2
+        # Stem
+        self.stem = ConvBNAct(3, stem_ch, kernel_size=3, stride=2, dilation=1, act="silu")
+        current_stride *= 2  # -> 2
 
-        # ---- Stages (MBConv) ----
-        # Base specs are fixed; repeats are depth-scaled; output channels are forced from your table.
-        base_in = stem_ch
+        # Stages
+        stage_out = ch[1:8]  # stage1..stage7 out channels
+        self.stages = nn.ModuleList()
+
+        # Count total blocks for linear drop-connect schedule
         total_blocks = 0
-        per_stage_repeats: List[int] = []
-        for (t, k, s, n_base) in _BASE_STAGE_SPECS:
-            n = _round_repeats(n_base, cfg.depth_mult)
-            per_stage_repeats.append(n)
-            total_blocks += n
+        repeats_per_stage: List[int] = []
+        for i, (exp, k, r, s, se) in enumerate(_EFF_B0_BLOCKS):
+            rr = _round_repeats(r, depth_mult)
+            repeats_per_stage.append(rr)
+            total_blocks += rr
 
-        block_id = 0
-        for stage_idx, ((t, k, s, n_base), out_ch) in enumerate(zip(_BASE_STAGE_SPECS, stage_out)):
-            repeats = per_stage_repeats[stage_idx]
+        block_idx = 0
+        in_ch = stem_ch
 
-            for i in range(repeats):
-                # First block of the stage uses stride s, others stride 1
-                intended_stride = s if i == 0 else 1
+        for si, out_ch in enumerate(stage_out):
+            exp, k, r_base, s_base, se = _EFF_B0_BLOCKS[si]
+            repeats = repeats_per_stage[si]
+            stage_stride = stage_strides[si]  # from your stride pattern
 
-                prev_dilation = dilation
-                if current_stride == self.output_stride:
-                    stride = 1
-                    # if we would have downsampled, convert it to dilation increase
-                    dilation *= intended_stride
-                else:
-                    stride = intended_stride
-                    current_stride *= intended_stride
+            # decide stride/dilation for the FIRST block of the stage
+            prev_dilation = dilation
+            if current_stride == self.output_stride:
+                first_stride = 1
+                dilation *= stage_stride
+            else:
+                first_stride = stage_stride
+                current_stride *= stage_stride
 
-                # stochastic depth linearly increased across blocks
-                sd = cfg.drop_connect_rate * float(block_id) / float(max(1, total_blocks - 1))
-                block_id += 1
+            blocks: List[nn.Module] = []
+            for bi in range(repeats):
+                stride_i = first_stride if bi == 0 else 1
+                dilation_i = prev_dilation if bi == 0 else dilation
 
-                # For the first block in stage: use previous_dilation (like your MobileNetV2)
-                # For subsequent blocks: use current dilation
-                use_dil = prev_dilation if i == 0 else dilation
-
-                features.append(
+                dc = self.drop_connect_rate * (block_idx / max(1, total_blocks - 1))
+                blocks.append(
                     MBConv(
-                        in_ch=base_in,
+                        in_ch=in_ch,
                         out_ch=out_ch,
-                        stride=stride,
-                        dilation=use_dil,
-                        expand_ratio=t,
+                        stride=stride_i,
+                        dilation=dilation_i,
+                        expand_ratio=exp,
                         kernel_size=k,
-                        drop_rate=sd,
+                        se_ratio=se,
+                        drop_connect_rate=dc,
                     )
                 )
-                base_in = out_ch
+                in_ch = out_ch
+                block_idx += 1
 
-        # ---- Head (1x1 conv to cfg.channels[-1]) ----
-        features.append(ConvBNAct(base_in, head_ch, kernel_size=1, stride=1, dilation=1, act_layer=nn.SiLU))
+            self.stages.append(nn.Sequential(*blocks))
 
-        self.features = nn.Sequential(*features)
+        # Head
+        # head is stride 1 always, but dilation should be current dilation
+        self.head = ConvBNAct(in_ch, head_ch, kernel_size=1, stride=1, dilation=1, act="silu")
 
-        # ---- Classifier (dropout + linear) ----
+        # Classifier (original style)
         self.classifier = nn.Sequential(
-            nn.Dropout(cfg.dropout),
-            nn.Linear(head_ch, num_classes),
+            nn.Dropout(self.drop_rate),
+            nn.Linear(head_ch, self.num_classes),
         )
 
-        # ---- Weight init (match your MobileNetV2-style) ----
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        # mimic torchvision-ish init, ok for training-from-scratch too
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out")
@@ -394,91 +371,96 @@ class EfficientNetV1(nn.Module):
                 nn.init.normal_(m.weight, 0, 0.01)
                 nn.init.zeros_(m.bias)
 
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        for st in self.stages:
+            x = st(x)
+        x = self.head(x)
+        return x
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.features(x)
+        x = self.forward_features(x)
         x = x.mean((2, 3))
         x = self.classifier(x)
         return x
 
-    @torch.no_grad()
-    def extract_backbone_features(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Convenience for segmentation backbones: returns the final feature map before global pooling.
-        (i.e., output of self.features, shape [N, head_ch, H', W']).
-        """
-        return self.features(x)
+
+def _load_pretrained(model: nn.Module, arch: str, progress: bool = True) -> None:
+    url = model_urls.get(arch, None)
+    if url is None:
+        raise ValueError(f"No pretrained URL for arch='{arch}'")
+
+    state_dict = load_state_dict_from_url(url, progress=progress)
+
+    # Be robust if user changes num_classes
+    # Remove classifier weights if shape mismatch
+    if "classifier.1.weight" in state_dict and hasattr(model, "classifier"):
+        w = state_dict["classifier.1.weight"]
+        b = state_dict.get("classifier.1.bias", None)
+        try:
+            target_w = model.classifier[1].weight
+            if w.shape != target_w.shape:
+                state_dict.pop("classifier.1.weight", None)
+                state_dict.pop("classifier.1.bias", None)
+        except Exception:
+            pass
+        # also handle alt keys sometimes used
+    state_dict.pop("classifier.weight", None)
+    state_dict.pop("classifier.bias", None)
+
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    # (volutamente niente print: come torchvision)
 
 
-def _build_cfg(name: str) -> EfficientNetConfig:
-    if name not in EFFICIENTNET_CHANNELS:
-        raise ValueError(f"Unknown EfficientNet variant: {name}")
-
-    _, depth = _EFFICIENTNET_MULTS[name]
-    dropout = _EFFICIENTNET_DROPOUT[name]
-    channels = EFFICIENTNET_CHANNELS[name]
-    return EfficientNetConfig(name=name, channels=channels, depth_mult=depth, dropout=dropout)
-
-
-def _efficientnet(
+def get_efficientnet(
     arch: str,
     pretrained: bool = False,
     progress: bool = True,
-    num_classes: int = 1000,
-    output_stride: int = 32,
-    in_chans: int = 3,
+    **kwargs,
 ) -> EfficientNetV1:
-    cfg = _build_cfg(arch)
-    model = EfficientNetV1(cfg=cfg, num_classes=num_classes, output_stride=output_stride, in_chans=in_chans)
+    """
+    Factory in style of mobilenet_v2(pretrained=..., **kwargs)
+    kwargs: num_classes, output_stride, drop_rate, drop_connect_rate
+    """
+    # default drop rates per-family if user doesn't pass them
+    if "drop_rate" not in kwargs:
+        kwargs["drop_rate"] = _DROPOUT[arch]
+    if "drop_connect_rate" not in kwargs:
+        kwargs["drop_connect_rate"] = _DROP_CONNECT[arch]
 
+    model = EfficientNetV1(arch=arch, **kwargs)
     if pretrained:
-        if arch not in model_urls:
-            raise ValueError(f"No URL available for pretrained weights for {arch}")
-        state_dict = load_state_dict_from_url(model_urls[arch], progress=progress)
-
-        # If you use pretrained weights but change num_classes, this will fail unless you handle it.
-        # Typically for segmentation backbones you set num_classes=1000, load, then drop classifier.
-        model.load_state_dict(state_dict)
-
+        _load_pretrained(model, arch=arch, progress=progress)
     return model
 
 
 def efficientnet_b0(pretrained: bool = False, progress: bool = True, **kwargs) -> EfficientNetV1:
-    return _efficientnet("efficientnet_b0", pretrained=pretrained, progress=progress, **kwargs)
+    return get_efficientnet("efficientnet_b0", pretrained=pretrained, progress=progress, **kwargs)
 
 
 def efficientnet_b1(pretrained: bool = False, progress: bool = True, **kwargs) -> EfficientNetV1:
-    return _efficientnet("efficientnet_b1", pretrained=pretrained, progress=progress, **kwargs)
+    return get_efficientnet("efficientnet_b1", pretrained=pretrained, progress=progress, **kwargs)
 
 
 def efficientnet_b2(pretrained: bool = False, progress: bool = True, **kwargs) -> EfficientNetV1:
-    return _efficientnet("efficientnet_b2", pretrained=pretrained, progress=progress, **kwargs)
+    return get_efficientnet("efficientnet_b2", pretrained=pretrained, progress=progress, **kwargs)
 
 
 def efficientnet_b3(pretrained: bool = False, progress: bool = True, **kwargs) -> EfficientNetV1:
-    return _efficientnet("efficientnet_b3", pretrained=pretrained, progress=progress, **kwargs)
+    return get_efficientnet("efficientnet_b3", pretrained=pretrained, progress=progress, **kwargs)
 
 
 def efficientnet_b4(pretrained: bool = False, progress: bool = True, **kwargs) -> EfficientNetV1:
-    return _efficientnet("efficientnet_b4", pretrained=pretrained, progress=progress, **kwargs)
+    return get_efficientnet("efficientnet_b4", pretrained=pretrained, progress=progress, **kwargs)
 
 
 def efficientnet_b5(pretrained: bool = False, progress: bool = True, **kwargs) -> EfficientNetV1:
-    return _efficientnet("efficientnet_b5", pretrained=pretrained, progress=progress, **kwargs)
+    return get_efficientnet("efficientnet_b5", pretrained=pretrained, progress=progress, **kwargs)
 
 
 def efficientnet_b6(pretrained: bool = False, progress: bool = True, **kwargs) -> EfficientNetV1:
-    return _efficientnet("efficientnet_b6", pretrained=pretrained, progress=progress, **kwargs)
+    return get_efficientnet("efficientnet_b6", pretrained=pretrained, progress=progress, **kwargs)
 
 
 def efficientnet_b7(pretrained: bool = False, progress: bool = True, **kwargs) -> EfficientNetV1:
-    return _efficientnet("efficientnet_b7", pretrained=pretrained, progress=progress, **kwargs)
-
-
-if __name__ == "__main__":
-    # quick sanity check
-    m = efficientnet_b0(pretrained=False, num_classes=1000, output_stride=8)
-    x = torch.randn(1, 3, 224, 224)
-    y = m(x)
-    print("logits:", y.shape)
-    f = m.extract_backbone_features(x)
-    print("features:", f.shape, "head_ch:", m.cfg.channels[-1])
+    return get_efficientnet("efficientnet_b7", pretrained=pretrained, progress=progress, **kwargs)
