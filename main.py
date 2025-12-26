@@ -62,6 +62,8 @@ def get_argparser():
     parser.add_argument("--val_batch_size", type=int, default=4,
                         help='batch size for validation (default: 4)')
     parser.add_argument("--crop_size", type=int, default=513)
+    parser.add_argument("--multiscale_train", action='store_true', default=False,
+                        help="whether multiscale training is applied")
 
     parser.add_argument("--ckpt", default=None, type=str,
                         help="restore from checkpoint")
@@ -133,7 +135,8 @@ def get_dataset(opts):
     if opts.dataset == 'cityscapes':
         train_transform = et.ExtCompose([
             # et.ExtResize( 512 ),
-            et.ExtRandomCrop(size=(opts.crop_size, opts.crop_size)),
+            et.ExtRandomScale((0.5, 2.0)) if opts.multiscale_train else et.ExtRandomScale((1.0, 1.0)),
+            et.ExtRandomCrop(size=(opts.crop_size, opts.crop_size), pad_if_needed=True),
             et.ExtColorJitter(brightness=0.5, contrast=0.5, saturation=0.5),
             et.ExtRandomHorizontalFlip(),
             et.ExtToTensor(),
@@ -326,7 +329,7 @@ def main():
         # =====  Train  =====
         model.train()
         cur_epochs += 1
-        for (images, labels) in train_loader:
+        for (images, labels) in tqdm(train_loader):
             cur_itrs += 1
 
             images = images.to(device, dtype=torch.float32)
