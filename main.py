@@ -22,7 +22,7 @@ from datetime import datetime
 
 from utils.visualizer import WandbVisualizer
 
-
+import wandb
 def get_argparser():
     parser = argparse.ArgumentParser()
 
@@ -102,6 +102,8 @@ def get_argparser():
     # Visdom options
     parser.add_argument("--enable_vis", action='store_true', default=False,
                         help="use wandb for visualization")
+    parser.add_argument("--vis_num_samples", type=int, default=10,
+                        help="number of samples to visualize during val")
     return parser
 
 
@@ -410,27 +412,37 @@ def main():
                     vis.vis_scalar("[Val] Overall Acc", cur_itrs, val_score['Overall Acc'])
                     vis.vis_scalar("[Val] Mean IoU", cur_itrs, val_score['Mean IoU'])
 
+                    visuals = []
                     for k, (img, target, lbl) in enumerate(ret_samples):
                         img = (denorm(img) * 255).astype(np.uint8)
-                        target = train_dst.decode_target(target).transpose(2, 0, 1).astype(np.uint8)
-                        lbl = train_dst.decode_target(lbl).transpose(2, 0, 1).astype(np.uint8)
-                        concat_img = np.concatenate((img, target, lbl), axis=2)  # concat along width
-                        vis.vis_image(
-                        name="val/sample",
-                        img=img,  # RGB uint8
-                        step=cur_itrs,
-                        masks={
-                            "prediction": {
-                                "mask_data": lbl,
-                                "class_labels": train_dst.classes,
-                            },
-                            "ground_truth": {
-                                "mask_data": target,
-                                "class_labels": train_dst.classes,
-                            },
-                        },
+                        img = np.transpose(img, (1, 2, 0))
+
+                        # color_gt, color_pred sono già (H, W, 3)
+                        color_gt   = train_dst.decode_target(target)
+                        color_pred = train_dst.decode_target(lbl)
+
+                        # concat lungo la larghezza
+                        concat_img = np.concatenate(
+                            [img, color_gt, color_pred],
+                            axis=1  # width
+                        )
+                        visuals.append(
+                            wandb.Image(
+                                concat_img,
+                                caption=f"step {cur_itrs} | sample {k}"
+                            )
+                        )
+
+
+                    # log TUTTO insieme
+                    wandb.log(
+                        {"visuals": visuals},
+                        step=cur_itrs
                     )
+
                 model.train()
+
+
             scheduler.step()
 
             if cur_itrs >= opts.total_itrs:
