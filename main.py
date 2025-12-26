@@ -18,7 +18,8 @@ from utils.visualizer import Visualizer
 from PIL import Image
 import matplotlib
 import matplotlib.pyplot as plt
-
+import sys
+from datetime import datetime
 
 def get_argparser():
     parser = argparse.ArgumentParser()
@@ -30,6 +31,12 @@ def get_argparser():
                         choices=['voc', 'cityscapes'], help='Name of dataset')
     parser.add_argument("--num_classes", type=int, default=None,
                         help="num classes (default: None)")
+    parser.add_argument(
+        "--exp_name",
+        type=str,
+        required=True,
+        help="Experiment name (used as subfolder inside checkpoints/)"
+    )
 
     # Deeplab Options
     available_models = sorted(name for name in network.modeling.__dict__ if name.islower() and \
@@ -222,6 +229,41 @@ def main():
     elif opts.dataset.lower() == 'cityscapes':
         opts.num_classes = 19
 
+
+    # -------------------------------------------------
+    # Experiment folders
+    # -------------------------------------------------
+    exp_dir = os.path.join("checkpoints", opts.exp_name)
+    os.makedirs(exp_dir, exist_ok=True)
+
+    log_file = os.path.join(exp_dir, "train.log")
+
+    # -------------------------------------------------
+    # Redirect stdout + stderr to both terminal and file
+    # -------------------------------------------------
+    class Tee(object):
+        def __init__(self, *files):
+            self.files = files
+
+        def write(self, obj):
+            for f in self.files:
+                f.write(obj)
+                f.flush()
+
+        def flush(self):
+            for f in self.files:
+                f.flush()
+
+    log_fh = open(log_file, "a")
+    sys.stdout = Tee(sys.stdout, log_fh)
+    sys.stderr = Tee(sys.stderr, log_fh)
+
+    print("=" * 80)
+    print(f"Experiment: {opts.exp_name}")
+    print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 80)
+
+
     # Setup visualization
     vis = Visualizer(port=opts.vis_port,
                      env=opts.vis_env) if opts.enable_vis else None
@@ -249,6 +291,13 @@ def main():
         val_dst, batch_size=opts.val_batch_size, shuffle=True, num_workers=2)
     print("Dataset: %s, Train set: %d, Val set: %d" %
           (opts.dataset, len(train_dst), len(val_dst)))
+    
+
+
+    print("Configuration:")
+    for k, v in vars(opts).items():
+        print(f"  {k}: {v}")
+    print("-" * 80)
 
     # Set up model (all models are 'constructed at network.modeling)
     model = network.modeling.__dict__[opts.model](num_classes=opts.num_classes, output_stride=opts.output_stride)
@@ -278,19 +327,22 @@ def main():
     elif opts.loss_type == 'cross_entropy':
         criterion = nn.CrossEntropyLoss(ignore_index=255, reduction='mean')
 
-    def save_ckpt(path):
-        """ save current model
+    def save_ckpt(tag):
         """
+        Save checkpoint inside experiment folder.
+        tag: "latest" or "best"
+        """
+        path = os.path.join(exp_dir, f"{tag}.pth")
         torch.save({
             "cur_itrs": cur_itrs,
             "model_state": model.module.state_dict(),
             "optimizer_state": optimizer.state_dict(),
             "scheduler_state": scheduler.state_dict(),
             "best_score": best_score,
+            "opts": vars(opts),
         }, path)
-        print("Model saved as %s" % path)
+        print(f"[CKPT] Saved {tag} checkpoint to {path}")
 
-    utils.mkdir('checkpoints')
     # Restore
     best_score = 0.0
     cur_itrs = 0
@@ -355,8 +407,7 @@ def main():
                 interval_loss = 0.0
 
             if (cur_itrs) % opts.val_interval == 0:
-                save_ckpt('checkpoints/latest_%s_%s_os%d.pth' %
-                          (opts.model, opts.dataset, opts.output_stride))
+                save_ckpt("latest")
                 print("validation...")
                 model.eval()
                 val_score, ret_samples = validate(
@@ -365,8 +416,7 @@ def main():
                 print(metrics.to_str(val_score))
                 if val_score['Mean IoU'] > best_score:  # save best model
                     best_score = val_score['Mean IoU']
-                    save_ckpt('checkpoints/best_%s_%s_os%d.pth' %
-                              (opts.model, opts.dataset, opts.output_stride))
+                    save_ckpt("best")
 
                 if vis is not None:  # visualize validation score and samples
                     vis.vis_scalar("[Val] Overall Acc", cur_itrs, val_score['Overall Acc'])
