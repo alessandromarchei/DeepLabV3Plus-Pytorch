@@ -120,8 +120,8 @@ def _segm_efficientnet(name, backbone_name, num_classes, output_stride, pretrain
     backbone = efficientnet.efficientnet_backbone(variant=backbone_name, pretrained=pretrained_backbone, output_stride=output_stride)
     
     # rename layers
-    backbone.low_level_features = backbone.features[0:4]
-    backbone.high_level_features = backbone.features[4:-1]
+    backbone.low_level_features = backbone.features[0:3]
+    backbone.high_level_features = backbone.features[3:-1]
     backbone.features = None
     backbone.classifier = None
 
@@ -132,7 +132,7 @@ def _segm_efficientnet(name, backbone_name, num_classes, output_stride, pretrain
 
     #log all the data
     print(f"EfficientNet backbone: {backbone_name}, output_stride: {output_stride}, inplanes: {inplanes}, low_level_planes: {low_level_planes}, pretrained: {pretrained_backbone}")
-    
+
     if name=='deeplabv3plus':
         return_layers = {'high_level_features': 'out', 'low_level_features': 'low_level'}
         classifier = DeepLabHeadV3Plus(inplanes, low_level_planes, num_classes, aspp_dilate)
