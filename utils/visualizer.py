@@ -1,87 +1,126 @@
-from visdom import Visdom
-import json 
+import wandb
+import numpy as np
 
-class Visualizer(object):
-    """ Visualizer
+
+class WandbVisualizer:
     """
-    def __init__(self, port='13579', env='main', id=None):
-        #self.cur_win = {}
-        self.vis = Visdom(port=port, env=env)
-        self.id = id
-        self.env = env
-        # Restore
-        #ori_win = self.vis.get_window_data()
-        #ori_win = json.loads(ori_win)
-        #print(ori_win)
-        #self.cur_win = { v['title']: k for k, v in ori_win.items()  }
+    WandB-based visualizer, API-compatible with the old Visdom Visualizer.
 
-    def vis_scalar(self, name, x, y, opts=None):
-        if not isinstance(x, list):
-            x = [x]
-        if not isinstance(y, list):
-            y = [y]
-        
-        if self.id is not None:
-            name = "[%s]"%self.id + name
-        default_opts = { 'title': name }
-        if opts is not None:
-            default_opts.update(opts)
+    Supports:
+      - scalars
+      - images (optionally with masks)
+      - tables (dicts)
+    """
 
-        #win = self.cur_win.get(name, None)
-        #if win is not None:
-        self.vis.line( X=x, Y=y, win=name, opts=default_opts, update='append')
-        #else:
-        #    self.cur_win[name] = self.vis.line( X=x, Y=y, opts=default_opts)
-
-    def vis_image(self, name, img, env=None, opts=None):
-        """ vis image in visdom
+    def __init__(
+        self,
+        project: str,
+        exp_name: str,
+        config: dict = None,
+        id: str = None,
+        dir: str = None,
+        mode: str = "online",  # "online", "offline", "disabled"
+    ):
         """
-        if env is None:
-            env = self.env 
+        Args:
+            project (str): wandb project name
+            exp_name (str): run name
+            config (dict): experiment config (args)
+            id (str): optional prefix for all logged keys
+            dir (str): directory for wandb files
+            mode (str): wandb mode
+        """
+        self.id = id
+        self.run = wandb.init(
+            project=project,
+            name=exp_name,
+            config=config,
+            dir=dir,
+            mode=mode,
+        )
+
+    def _prefix(self, name: str) -> str:
         if self.id is not None:
-            name = "[%s]"%self.id + name
-        #win = self.cur_win.get(name, None)
-        default_opts = { 'title': name }
-        if opts is not None:
-                default_opts.update(opts)
-        #if win is not None:
-        self.vis.image( img=img, win=name, opts=opts, env=env )
-        #else:
-        #    self.cur_win[name] = self.vis.image( img=img, opts=default_opts, env=env )
-    
-    def vis_table(self, name, tbl, opts=None):
-        #win = self.cur_win.get(name, None)
+            return f"[{self.id}] {name}"
+        return name
 
-        tbl_str = "<table width=\"100%\"> "
-        tbl_str+="<tr> \
-                 <th>Term</th> \
-                 <th>Value</th> \
-                 </tr>"
+    # ------------------------------------------------------------------
+    # Scalars
+    # ------------------------------------------------------------------
+    def vis_scalar(self, name, x, y, opts=None):
+        """
+        Equivalent of visdom line plot (append).
+        In wandb: scalar vs step.
+        """
+        name = self._prefix(name)
+
+        if not isinstance(x, (list, tuple)):
+            x = [x]
+        if not isinstance(y, (list, tuple)):
+            y = [y]
+
+        for xi, yi in zip(x, y):
+            wandb.log({name: yi}, step=xi)
+
+    # ------------------------------------------------------------------
+    # Images
+    # ------------------------------------------------------------------
+    def vis_image(
+        self,
+        name,
+        img,
+        step=None,
+        masks=None,
+        caption=None,
+    ):
+        """
+        Log an image.
+        Optionally supports segmentation masks.
+
+        Args:
+            img: numpy array (H,W,C) or (C,H,W)
+            masks: dict like:
+                {
+                  "prediction": {"mask_data": pred, "class_labels": labels},
+                  "ground_truth": {"mask_data": gt, "class_labels": labels}
+                }
+        """
+        name = self._prefix(name)
+
+        if img.ndim == 3 and img.shape[0] in (1, 3):
+            img = np.transpose(img, (1, 2, 0))
+
+        wandb_img = wandb.Image(
+            img,
+            masks=masks,
+            caption=caption,
+        )
+
+        if step is None:
+            wandb.log({name: wandb_img})
+        else:
+            wandb.log({name: wandb_img}, step=step)
+
+    # ------------------------------------------------------------------
+    # Tables
+    # ------------------------------------------------------------------
+    def vis_table(self, name, tbl: dict, step=None):
+        """
+        Log a dict as a table.
+        """
+        name = self._prefix(name)
+
+        table = wandb.Table(columns=["key", "value"])
         for k, v in tbl.items():
-            tbl_str+=  "<tr> \
-                       <td>%s</td> \
-                       <td>%s</td> \
-                       </tr>"%(k, v)
+            table.add_data(k, str(v))
 
-        tbl_str+="</table>"
+        if step is None:
+            wandb.log({name: table})
+        else:
+            wandb.log({name: table}, step=step)
 
-        default_opts = { 'title': name }
-        if opts is not None:
-            default_opts.update(opts)
-        #if win is not None:
-        self.vis.text(tbl_str, win=name, opts=default_opts)
-        #else:
-        #self.cur_win[name] = self.vis.text(tbl_str, opts=default_opts)
-
-
-if __name__=='__main__':
-    import numpy as np
-    vis = Visualizer(port=35588, env='main')
-    tbl = {"lr": 214, "momentum": 0.9}
-    vis.vis_table("test_table", tbl)
-    tbl = {"lr": 244444, "momentum": 0.9, "haha": "hoho"}
-    vis.vis_table("test_table", tbl)
-
-    vis.vis_scalar(name='loss', x=0, y=1)
-    vis.vis_scalar(name='loss', x=2, y=4)
-    vis.vis_scalar(name='loss', x=4, y=6)
+    # ------------------------------------------------------------------
+    # Finish
+    # ------------------------------------------------------------------
+    def finish(self):
+        wandb.finish()

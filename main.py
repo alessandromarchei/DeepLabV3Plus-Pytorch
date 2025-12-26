@@ -13,13 +13,15 @@ from metrics import StreamSegMetrics
 
 import torch
 import torch.nn as nn
-from utils.visualizer import Visualizer
 
 from PIL import Image
 import matplotlib
 import matplotlib.pyplot as plt
 import sys
 from datetime import datetime
+
+from utils.visualizer import WandbVisualizer
+
 
 def get_argparser():
     parser = argparse.ArgumentParser()
@@ -99,13 +101,7 @@ def get_argparser():
 
     # Visdom options
     parser.add_argument("--enable_vis", action='store_true', default=False,
-                        help="use visdom for visualization")
-    parser.add_argument("--vis_port", type=str, default='13570',
-                        help='port for visdom')
-    parser.add_argument("--vis_env", type=str, default='main',
-                        help='env for visdom')
-    parser.add_argument("--vis_num_samples", type=int, default=8,
-                        help='number of samples for visualization (default: 8)')
+                        help="use wandb for visualization")
     return parser
 
 
@@ -241,22 +237,6 @@ def main():
     # -------------------------------------------------
     # Redirect stdout + stderr to both terminal and file
     # -------------------------------------------------
-    class Tee(object):
-        def __init__(self, *files):
-            self.files = files
-
-        def write(self, obj):
-            for f in self.files:
-                f.write(obj)
-                f.flush()
-
-        def flush(self):
-            for f in self.files:
-                f.flush()
-
-    log_fh = open(log_file, "a")
-    sys.stdout = Tee(sys.stdout, log_fh)
-    sys.stderr = Tee(sys.stderr, log_fh)
 
     print("=" * 80)
     print(f"Experiment: {opts.exp_name}")
@@ -265,10 +245,18 @@ def main():
 
 
     # Setup visualization
-    vis = Visualizer(port=opts.vis_port,
-                     env=opts.vis_env) if opts.enable_vis else None
-    if vis is not None:  # display options
-        vis.vis_table("Options", vars(opts))
+    #start wandb logger
+    if opts.enable_vis:
+        vis = WandbVisualizer(
+            project="deeplabv3plus",
+            exp_name=opts.exp_name,
+            config=vars(opts),
+            id=opts.model,
+            dir=exp_dir,
+        )
+    else:
+        vis = None
+
 
     os.environ['CUDA_VISIBLE_DEVICES'] = opts.gpu_id
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -398,7 +386,7 @@ def main():
             np_loss = loss.detach().cpu().numpy()
             interval_loss += np_loss
             if vis is not None:
-                vis.vis_scalar('Loss', cur_itrs, np_loss)
+                vis.vis_scalar("train/loss", cur_itrs, np_loss)
 
             if (cur_itrs) % 10 == 0:
                 interval_loss = interval_loss / 10
@@ -421,18 +409,33 @@ def main():
                 if vis is not None:  # visualize validation score and samples
                     vis.vis_scalar("[Val] Overall Acc", cur_itrs, val_score['Overall Acc'])
                     vis.vis_scalar("[Val] Mean IoU", cur_itrs, val_score['Mean IoU'])
-                    vis.vis_table("[Val] Class IoU", val_score['Class IoU'])
 
                     for k, (img, target, lbl) in enumerate(ret_samples):
                         img = (denorm(img) * 255).astype(np.uint8)
                         target = train_dst.decode_target(target).transpose(2, 0, 1).astype(np.uint8)
                         lbl = train_dst.decode_target(lbl).transpose(2, 0, 1).astype(np.uint8)
                         concat_img = np.concatenate((img, target, lbl), axis=2)  # concat along width
-                        vis.vis_image('Sample %d' % k, concat_img)
+                        vis.vis_image(
+                        name="val/sample",
+                        img=img,  # RGB uint8
+                        step=cur_itrs,
+                        masks={
+                            "prediction": {
+                                "mask_data": lbl,
+                                "class_labels": train_dst.classes,
+                            },
+                            "ground_truth": {
+                                "mask_data": target,
+                                "class_labels": train_dst.classes,
+                            },
+                        },
+                    )
                 model.train()
             scheduler.step()
 
             if cur_itrs >= opts.total_itrs:
+                if vis is not None:
+                    vis.finish()
                 return
 
 
