@@ -121,9 +121,6 @@ def _aspp_dilate(output_stride: int):
     return [6, 12, 18]
 
 
-# -------------------------------------------------------------------------
-# EfficientNetV1
-# -------------------------------------------------------------------------
 def _segm_efficientnet(
     name: str,
     backbone_name: str,
@@ -132,111 +129,45 @@ def _segm_efficientnet(
     pretrained_backbone: bool,
     **kwargs
 ):
-    """
-    EfficientNet split (coerente con stride pattern):
-      stem: stride 2
-      stage1: stride 1  -> still 2
-      stage2: stride 2  -> 4  => LOW LEVEL (fine stage2)
-      stage3: stride 2  -> 8
-      stage4: stride 2  -> 16
-      stage5: stride 1  -> 16
-      stage6: stride 2  -> 32
-      stage7: stride 1  -> 32
-      head:  stride 1   -> 32 => HIGH LEVEL (fine head)
-
-    output_stride=8/16/32 gestito dentro backbone (stride->dilation).
-    """
     aspp_from = kwargs.pop("aspp_from", "head")
     aspp_dilate = _aspp_dilate(output_stride)
 
-    # build efficientnet backbone
     backbone = efficientnet.get_efficientnet(
         backbone_name,
         pretrained=pretrained_backbone,
         output_stride=output_stride,
-        num_classes=1000,  # classificazione originale
+        num_classes=1000,
     )
 
     ch = efficientnet.EFFICIENTNET_CHANNELS[backbone_name]
+    low_level_planes = ch[2]
 
-    # ----------------------------
-    # LOW LEVEL (stage2)
-    # ----------------------------
-    low_level_planes = ch[2]   # stage2 out channels
-
-    backbone.low_level_features = nn.Sequential(
-        backbone.stem,
-        backbone.stages[0],  # stage1
-        backbone.stages[1],  # stage2
-    )
-
-    # ----------------------------
-    # HIGH LEVEL CANDIDATES
-    # ----------------------------
-    backbone.stage7_features = nn.Sequential(
-        backbone.stages[2],  # stage3
-        backbone.stages[3],  # stage4
-        backbone.stages[4],  # stage5
-        backbone.stages[5],  # stage6
-        backbone.stages[6],  # stage7
-    )
-
-    backbone.head_features = nn.Sequential(
-        backbone.stage7_features,
-        backbone.head,
-    )
-
-    # ----------------------------
-    # ASPP TAP SELECTION
-    # ----------------------------
     if aspp_from == "head":
-        backbone.high_level_features = backbone.head_features
-        inplanes = ch[-1]       # head channels (1280 / 1536 / ...)
-
+        inplanes = ch[-1]
     elif aspp_from == "stage7":
-        backbone.high_level_features = backbone.stage7_features
-        inplanes = ch[-2]       # stage7 channels (320 / 384 / ...)
-
+        inplanes = ch[-2]
     else:
-        raise ValueError(
-            f"Invalid aspp_from='{aspp_from}', choose ['head', 'stage7']"
-        )
+        raise ValueError(f"Invalid aspp_from={aspp_from}")
 
-    # ----------------------------
-    # CLEANUP BACKBONE
-    # ----------------------------
-    backbone.stem = None
-    backbone.stages = None
-    backbone.head = None
-    backbone.classifier = None
+    backbone = efficientnet.EfficientNetSegBackbone(backbone, aspp_from)
 
-    # ----------------------------
-    # DEEPLAB HEAD
-    # ----------------------------
     if name == "deeplabv3plus":
-        return_layers = {
-            "high_level_features": "out",
-            "low_level_features": "low_level",
-        }
         classifier = DeepLabHeadV3Plus(
             inplanes,
-            low_level_planes,   
+            low_level_planes,
             num_classes,
             aspp_dilate,
         )
-
-    elif name == "deeplabv3":
-        return_layers = {"high_level_features": "out"}
+    else:
         classifier = DeepLabHead(inplanes, num_classes, aspp_dilate)
 
-    else:
-        raise ValueError(f"Unknown model name: {name}")
-
-    backbone = IntermediateLayerGetter(backbone, return_layers=return_layers)
     model = DeepLabV3(backbone, classifier)
 
-    print(f"EfficientNetV1 Backbone: {backbone_name}, ASPP input channels: {inplanes}, low-level channels: {low_level_planes}")
-    
+    print(
+        f"[EffNet] {backbone_name} | ASPP from: {aspp_from} | "
+        f"inplanes={inplanes}, low={low_level_planes}"
+    )
+
     return model
 
 

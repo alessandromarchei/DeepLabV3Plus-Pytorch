@@ -385,6 +385,49 @@ class EfficientNetV1(nn.Module):
         return x
 
 
+class EfficientNetSegBackbone(nn.Module):
+    def __init__(self, backbone, aspp_from: str):
+        super().__init__()
+        self.backbone = backbone
+        self.aspp_from = aspp_from
+
+        # LOW LEVEL (fino a stage2)
+        self.low_level_features = nn.Sequential(
+            backbone.stem,
+            backbone.stages[0],
+            backbone.stages[1],
+        )
+
+        # HIGH LEVEL
+        self.stage7_features = nn.Sequential(
+            backbone.stages[2],
+            backbone.stages[3],
+            backbone.stages[4],
+            backbone.stages[5],
+            backbone.stages[6],
+        )
+
+        self.head_features = nn.Sequential(
+            self.stage7_features,
+            backbone.head,
+        )
+
+    def forward(self, x):
+        low = self.low_level_features(x)
+
+        if self.aspp_from == "stage7":
+            out = self.stage7_features(low)
+        else:
+            out = self.head_features(low)
+
+        return {
+            "low_level": low,
+            "out": out,
+        }
+
+
+
+
 def _load_pretrained(model: nn.Module, arch: str, progress: bool = True) -> None:
     url = model_urls.get(arch, None)
     if url is None:
