@@ -95,8 +95,8 @@ def _segm_mobilenet(name, backbone_name, num_classes, output_stride, pretrained_
     backbone = mobilenetv2.mobilenet_v2(pretrained=pretrained_backbone, output_stride=output_stride)
     
     # rename layers
-    backbone.low_level_features = backbone.features[0:4]
-    backbone.high_level_features = backbone.features[4:-1]
+    backbone.low_level_features = backbone.features[0:4]        #take the first 4 layers (32, 16, 24, 24 channels)
+    backbone.high_level_features = backbone.features[4:-1]      #take the remaining layers except the last ConvBNReLU layer (96, 1280 channels)
     backbone.features = None
     backbone.classifier = None
 

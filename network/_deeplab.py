@@ -28,14 +28,19 @@ class DeepLabV3(_SimpleSegmentationModel):
 class DeepLabHeadV3Plus(nn.Module):
     def __init__(self, in_channels, low_level_channels, num_classes, aspp_dilate=[12, 24, 36]):
         super(DeepLabHeadV3Plus, self).__init__()
+        
+        #module that maps the low level features to the post aspp features (24 -> 48 channels)
         self.project = nn.Sequential( 
             nn.Conv2d(low_level_channels, 48, 1, bias=False),
             nn.BatchNorm2d(48),
             nn.ReLU(inplace=True),
         )
 
+        #map the high level features (OS=16) 320 channels to 256 *5 channels and project them to 256 channels
         self.aspp = ASPP(in_channels, aspp_dilate)
 
+
+        #process the concatenated features. (low level 48 + high level 256 = 304 channels)
         self.classifier = nn.Sequential(
             nn.Conv2d(304, 256, 3, padding=1, bias=False),
             nn.BatchNorm2d(256),
@@ -45,10 +50,19 @@ class DeepLabHeadV3Plus(nn.Module):
         self._init_weight()
 
     def forward(self, feature):
-        low_level_feature = self.project( feature['low_level'] )
-        output_feature = self.aspp(feature['out'])
+        low_level_feature = self.project( feature['low_level'] )        #project low level features to 48 channels
+        
+        output_feature = self.aspp(feature['out'])                      #process high level features with ASPP
+
+        #upsample ASPP output (OS=16) to match low level feature size (OS=4)
         output_feature = F.interpolate(output_feature, size=low_level_feature.shape[2:], mode='bilinear', align_corners=False)
-        return self.classifier( torch.cat( [ low_level_feature, output_feature ], dim=1 ) )
+
+        #apply classifier on the concatenated features
+        output = self.classifier( torch.cat( [ low_level_feature, output_feature ], dim=1 ) )
+
+        #the _SimpleSegmentationModel will upsample to the input image size (OS=4 -> OS=1 output)
+
+        return output
     
     def _init_weight(self):
         for m in self.modules():
