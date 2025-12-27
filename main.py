@@ -88,8 +88,8 @@ def get_argparser():
                         help='crop validation (default: False)')
     parser.add_argument("--batch_size", type=int, default=16,
                         help='batch size (default: 16)')
-    parser.add_argument("--val_batch_size", type=int, default=16,
-                        help='batch size for validation (default: 16)')
+    parser.add_argument("--val_batch_size", type=int, default=2,
+                        help='batch size for validation (default: 2)')
     parser.add_argument("--crop_size", type=int, default=513)
     parser.add_argument("--multiscale_train", action='store_true', default=False,
                         help="whether multiscale training is applied")
@@ -114,6 +114,10 @@ def get_argparser():
                         help="epoch interval for eval (default: 100)")
     parser.add_argument("--download", action='store_true', default=False,
                         help="download datasets")
+    parser.add_argument("--num_workers", type=int, default=6,
+                        help="number of workers for dataloader (default: 6)")
+    parser.add_argument("--prefetch_factor", type=int, default=2,
+                        help="number of samples loaded in advance by each worker (default: 4)")
 
     # PASCAL VOC Options
     parser.add_argument("--year", type=str, default='2012',
@@ -319,18 +323,16 @@ def main():
         train_dst,
         batch_size=opts.batch_size,
         shuffle=True,
-        num_workers=6,
+        num_workers=opts.num_workers,
         pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=4,
+        prefetch_factor=opts.prefetch_factor,
         drop_last=True,
     )
 
     val_loader = data.DataLoader(
-        val_dst, batch_size=opts.val_batch_size, shuffle=True, num_workers=6,
+        val_dst, batch_size=opts.val_batch_size, shuffle=True, num_workers=opts.num_workers,
         pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=4,
+        prefetch_factor=1,
     )
 
     print("Dataset: %s, Train set: %d, Val set: %d" %
