@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-
+import segmentation_models_pytorch as smp
 from .utils import IntermediateLayerGetter
 from ._deeplab import DeepLabHead, DeepLabHeadV3Plus, DeepLabV3
 from .backbone import (
@@ -171,6 +171,48 @@ def _segm_efficientnet(
     return model
 
 
+def _segm_efficientnet(
+    name: str,
+    backbone_name: str,
+    num_classes: int,
+    output_stride: int,
+    pretrained_backbone: bool,
+    **kwargs,
+):
+    """
+    Wrapper DeepLabV3 / DeepLabV3+ usando segmentation_models.pytorch
+    con EfficientNet pretrained ImageNet.
+    """
+
+    if name != "deeplabv3plus":
+        raise NotImplementedError(
+            "SMP wrapper implemented only for DeepLabV3+"
+        )
+
+    # SMP encoder names: "efficientnet-b0" ... "efficientnet-b7"
+    encoder_name = backbone_name.replace("_", "-")
+
+    # SMP supporta output_stride = 8 o 16
+    if output_stride not in [8, 16]:
+        raise ValueError("SMP DeepLabV3Plus supports output_stride 8 or 16")
+
+    model = smp.DeepLabV3Plus(
+        encoder_name=encoder_name,
+        encoder_weights="imagenet" if pretrained_backbone else None,
+        in_channels=3,
+        classes=num_classes,
+        encoder_output_stride=output_stride,
+        activation=None,  # IMPORTANT: logits raw (CrossEntropy)
+    )
+
+    print(
+        f"[SMP] DeepLabV3Plus | encoder={encoder_name} | "
+        f"pretrained={pretrained_backbone} | os={output_stride}"
+    )
+
+    return model
+
+
 
 def _load_model(arch_type, backbone, num_classes, output_stride, pretrained_backbone, **kwargs):
 
@@ -297,7 +339,7 @@ def deeplabv3plus_efficientnet_b0(num_classes=21, output_stride=8, pretrained_ba
         output_stride (int): output stride for deeplab.
         pretrained_backbone (bool): If True, use the pretrained backbone.
     """
-    return _load_model('deeplabv3plus', 'efficientnet_b0', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)
+    return _load_model('deeplabv3plus', 'timm_efficientnet_b0', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)
 
 def deeplabv3plus_efficientnet_b1(num_classes=21, output_stride=8, pretrained_backbone=True, **kwargs):
     """Constructs a DeepLabV3+ model with a EfficientNet-B1 backbone.
@@ -307,7 +349,7 @@ def deeplabv3plus_efficientnet_b1(num_classes=21, output_stride=8, pretrained_ba
         output_stride (int): output stride for deeplab.
         pretrained_backbone (bool): If True, use the pretrained backbone.
     """
-    return _load_model('deeplabv3plus', 'efficientnet_b1', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)
+    return _load_model('deeplabv3plus', 'timm_efficientnet_b1', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)
 
 def deeplabv3plus_efficientnet_b2(num_classes=21, output_stride=8, pretrained_backbone=True, **kwargs):
     """Constructs a DeepLabV3+ model with a EfficientNet-B2 backbone.
@@ -317,7 +359,7 @@ def deeplabv3plus_efficientnet_b2(num_classes=21, output_stride=8, pretrained_ba
         output_stride (int): output stride for deeplab.
         pretrained_backbone (bool): If True, use the pretrained backbone.
     """
-    return _load_model('deeplabv3plus', 'efficientnet_b2', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)
+    return _load_model('deeplabv3plus', 'timm_efficientnet_b2', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)
 
 def deeplabv3plus_efficientnet_b3(num_classes=21, output_stride=8, pretrained_backbone=True, **kwargs):
     """Constructs a DeepLabV3+ model with a EfficientNet-B3 backbone.
@@ -327,7 +369,7 @@ def deeplabv3plus_efficientnet_b3(num_classes=21, output_stride=8, pretrained_ba
         output_stride (int): output stride for deeplab.
         pretrained_backbone (bool): If True, use the pretrained backbone.
     """
-    return _load_model('deeplabv3plus', 'efficientnet_b3', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)
+    return _load_model('deeplabv3plus', 'timm_efficientnet_b3', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)
 
 def deeplabv3plus_efficientnet_b4(num_classes=21, output_stride=8, pretrained_backbone=True, **kwargs):
     """Constructs a DeepLabV3+ model with a EfficientNet-B4 backbone.
@@ -337,7 +379,7 @@ def deeplabv3plus_efficientnet_b4(num_classes=21, output_stride=8, pretrained_ba
         output_stride (int): output stride for deeplab.
         pretrained_backbone (bool): If True, use the pretrained backbone.
     """
-    return _load_model('deeplabv3plus', 'efficientnet_b4', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)
+    return _load_model('deeplabv3plus', 'timm_efficientnet_b4', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)
 
 def deeplabv3plus_efficientnet_b5(num_classes=21, output_stride=8, pretrained_backbone=True, **kwargs):
     """Constructs a DeepLabV3+ model with a EfficientNet-B5 backbone.
@@ -347,7 +389,7 @@ def deeplabv3plus_efficientnet_b5(num_classes=21, output_stride=8, pretrained_ba
         output_stride (int): output stride for deeplab.
         pretrained_backbone (bool): If True, use the pretrained backbone.
     """
-    return _load_model('deeplabv3plus', 'efficientnet_b5', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)
+    return _load_model('deeplabv3plus', 'timm_efficientnet_b5', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)
 
 def deeplabv3plus_efficientnet_b6(num_classes=21, output_stride=8, pretrained_backbone=True, **kwargs):
     """Constructs a DeepLabV3+ model with a EfficientNet-B6 backbone.
@@ -357,7 +399,7 @@ def deeplabv3plus_efficientnet_b6(num_classes=21, output_stride=8, pretrained_ba
         output_stride (int): output stride for deeplab.
         pretrained_backbone (bool): If True, use the pretrained backbone.
     """
-    return _load_model('deeplabv3plus', 'efficientnet_b6', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)
+    return _load_model('deeplabv3plus', 'timm_efficientnet_b6', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)
 
 def deeplabv3plus_efficientnet_b7(num_classes=21, output_stride=8, pretrained_backbone=True, **kwargs):
     """Constructs a DeepLabV3+ model with a EfficientNet-B7 backbone.
@@ -367,4 +409,4 @@ def deeplabv3plus_efficientnet_b7(num_classes=21, output_stride=8, pretrained_ba
         output_stride (int): output stride for deeplab.
         pretrained_backbone (bool): If True, use the pretrained backbone.
     """
-    return _load_model('deeplabv3plus', 'efficientnet_b7', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)
+    return _load_model('deeplabv3plus', 'timm_efficientnet_b7', num_classes, output_stride=output_stride, pretrained_backbone=pretrained_backbone, **kwargs)

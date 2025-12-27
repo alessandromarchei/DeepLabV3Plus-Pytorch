@@ -23,6 +23,16 @@ from datetime import datetime
 from utils.visualizer import WandbVisualizer
 
 import wandb
+
+def get_backbone(model):
+    if hasattr(model, "backbone"):
+        return model.backbone
+    if hasattr(model, "encoder"):
+        return model.encoder
+    raise AttributeError("Model has no backbone/encoder")
+
+
+
 def get_argparser():
     parser = argparse.ArgumentParser()
 
@@ -324,16 +334,35 @@ def main():
 
     if opts.separable_conv and 'plus' in opts.model:
         network.convert_to_separable_conv(model.classifier)
-    utils.set_bn_momentum(model.backbone, momentum=opts.bn_momentum)
+
+    
+    #set the bn momentum of the backbone
+    utils.set_bn_momentum(get_backbone(model), momentum=opts.bn_momentum)
+
 
     # Set up metrics
     metrics = StreamSegMetrics(opts.num_classes)
 
     # Set up optimizer
-    optimizer = torch.optim.SGD(params=[
-        {'params': model.backbone.parameters(), 'lr': opts.lr_backbone_coeff * opts.lr},
-        {'params': model.classifier.parameters(), 'lr': opts.lr},
-    ], lr=opts.lr, momentum=0.9, weight_decay=opts.weight_decay)
+    backbone_params = set(get_backbone(model).parameters())
+
+    optimizer = torch.optim.SGD(
+        params=[
+            {
+                "params": get_backbone(model).parameters(),
+                "lr": opts.lr_backbone_coeff * opts.lr,
+            },
+            {
+                "params": [p for p in model.parameters() if p not in backbone_params],
+                "lr": opts.lr,
+            },
+        ],
+        momentum=0.9,
+        weight_decay=opts.weight_decay,
+    )
+
+
+
     # optimizer = torch.optim.SGD(params=model.parameters(), lr=opts.lr, momentum=0.9, weight_decay=opts.weight_decay)
     # torch.optim.lr_scheduler.StepLR(optimizer, step_size=opts.lr_decay_step, gamma=opts.lr_decay_factor)
     if opts.lr_policy == 'poly':
